@@ -474,6 +474,19 @@
                 </div>
                 
                 <div class="control-group">
+                    <label>
+                        <input type="checkbox" id="pauseOnAnnotations" style="margin-right: 8px;">
+                        Pause on annotations
+                    </label>
+                </div>
+                
+                <div class="control-group">
+                    <label>Pause duration:</label>
+                    <input type="range" id="pauseDuration" min="1" max="5" value="2" style="width: 100px;">
+                    <span id="pauseDurationValue">2s</span>
+                </div>
+                
+                <div class="control-group">
                     <button class="btn-primary" id="playPause">▶️ Play</button>
                     <button class="btn-secondary" id="prevFrame">⏮️</button>
                     <button class="btn-secondary" id="nextFrame">⏭️</button>
@@ -552,6 +565,11 @@
         // Brush size
         document.getElementById('brushSize').addEventListener('input', function() {
             document.getElementById('sizeValue').textContent = this.value;
+        });
+        
+        // Pause duration
+        document.getElementById('pauseDuration').addEventListener('input', function() {
+            document.getElementById('pauseDurationValue').textContent = this.value + 's';
         });
 
         // Video controls
@@ -1058,7 +1076,9 @@
                     body: JSON.stringify({
                         videoId: state.uploadedVideo.id,
                         annotations: state.frames,
-                        videoData: state.uploadedVideo
+                        videoData: state.uploadedVideo,
+                        pauseOnAnnotations: document.getElementById('pauseOnAnnotations').checked,
+                        pauseDuration: parseFloat(document.getElementById('pauseDuration').value)
                     })
                 });
                 

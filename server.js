@@ -80,7 +80,7 @@ app.post('/api/upload', upload.single('video'), (req, res) => {
 // Process video with annotations
 app.post('/api/process', async (req, res) => {
     try {
-        const { videoId, annotations, videoData } = req.body;
+        const { videoId, annotations, videoData, pauseOnAnnotations, pauseDuration } = req.body;
         
         if (!videoId || !annotations) {
             return res.status(400).json({ error: 'Missing required data' });
@@ -101,7 +101,11 @@ app.post('/api/process', async (req, res) => {
         const videoInfo = await getVideoInfo(videoPath);
         
         // Create annotated video
-        await createAnnotatedVideo(videoPath, outputPath, annotations, videoInfo);
+        if (pauseOnAnnotations) {
+            await createPauseResumeVideo(videoPath, outputPath, annotations, videoInfo, pauseDuration || 2);
+        } else {
+            await createAnnotatedVideo(videoPath, outputPath, annotations, videoInfo);
+        }
 
         res.json({
             success: true,
@@ -330,6 +334,216 @@ function createFilterComplex(overlayFiles, videoInfo) {
     });
 
     return filters.join(';');
+}
+
+// Create pause/resume video with static annotation displays
+async function createPauseResumeVideo(inputPath, outputPath, annotations, videoInfo, pauseDuration) {
+    return new Promise((resolve, reject) => {
+        const tempDir = path.join('./temp', uuidv4());
+        fs.mkdirSync(tempDir, { recursive: true });
+
+        try {
+            // Get sorted annotation timestamps
+            const annotationTimestamps = Object.keys(annotations)
+                .filter(frame => annotations[frame].length > 0)
+                .map(frame => parseInt(frame) / videoInfo.fps)
+                .sort((a, b) => a - b);
+
+            if (annotationTimestamps.length === 0) {
+                // No annotations, just copy the original video
+                fs.copyFileSync(inputPath, outputPath);
+                resolve();
+                return;
+            }
+
+            console.log('Creating pause/resume video with timestamps:', annotationTimestamps);
+
+            // Create video segments and static clips
+            createVideoSegmentsAndStaticClips(inputPath, tempDir, annotations, videoInfo, annotationTimestamps, pauseDuration)
+                .then(() => {
+                    // Concatenate all segments
+                    return concatenateVideoSegments(tempDir, outputPath, annotationTimestamps.length);
+                })
+                .then(() => {
+                    console.log('Video processing completed');
+                    fs.rmSync(tempDir, { recursive: true, force: true });
+                    resolve();
+                })
+                .catch(error => {
+                    console.error('Processing error:', error);
+                    fs.rmSync(tempDir, { recursive: true, force: true });
+                    reject(error);
+                });
+
+        } catch (error) {
+            fs.rmSync(tempDir, { recursive: true, force: true });
+            reject(error);
+        }
+    });
+}
+
+// Create video segments and static clips for each annotation
+async function createVideoSegmentsAndStaticClips(inputPath, tempDir, annotations, videoInfo, timestamps, pauseDuration) {
+    const segmentPromises = [];
+    const staticPromises = [];
+
+    // Create segments between annotations
+    for (let i = 0; i <= timestamps.length; i++) {
+        const startTime = i === 0 ? 0 : timestamps[i - 1];
+        const endTime = i === timestamps.length ? videoInfo.duration : timestamps[i];
+        
+        if (endTime > startTime) {
+            const segmentPath = path.join(tempDir, `segment_${i}.mp4`);
+            segmentPromises.push(createVideoSegment(inputPath, segmentPath, startTime, endTime));
+        }
+
+        // Create static clip for annotation (except for the last iteration)
+        if (i < timestamps.length) {
+            const frame = Math.floor(timestamps[i] * videoInfo.fps);
+            if (annotations[frame] && annotations[frame].length > 0) {
+                const staticPath = path.join(tempDir, `static_${i}.mp4`);
+                staticPromises.push(createStaticAnnotationClip(inputPath, staticPath, timestamps[i], annotations[frame], videoInfo, pauseDuration));
+            }
+        }
+    }
+
+    await Promise.all([...segmentPromises, ...staticPromises]);
+}
+
+// Create a video segment between two timestamps
+function createVideoSegment(inputPath, outputPath, startTime, endTime) {
+    return new Promise((resolve, reject) => {
+        const duration = endTime - startTime;
+        console.log(`Creating segment: ${startTime}s to ${endTime}s (duration: ${duration}s)`);
+        
+        ffmpeg(inputPath)
+            .seekInput(startTime)
+            .duration(duration)
+            .videoCodec('libx264')
+            .audioCodec('copy')
+            .output(outputPath)
+            .on('start', (commandLine) => {
+                console.log('Segment command:', commandLine);
+            })
+            .on('end', () => {
+                console.log(`Segment created: ${outputPath}`);
+                resolve();
+            })
+            .on('error', reject)
+            .run();
+    });
+}
+
+// Create a static clip showing the video frame with annotation overlay
+function createStaticAnnotationClip(inputPath, outputPath, timestamp, shapes, videoInfo, duration) {
+    return new Promise((resolve, reject) => {
+        const frameImagePath = path.join(path.dirname(outputPath), `frame_${timestamp.toFixed(3)}.png`);
+        const overlayImagePath = path.join(path.dirname(outputPath), `overlay_${timestamp.toFixed(3)}.png`);
+
+        // Extract frame at timestamp
+        ffmpeg(inputPath)
+            .seekInput(timestamp)
+            .frames(1)
+            .output(frameImagePath)
+            .on('end', () => {
+                // Create overlay with annotations
+                createAnnotationOverlay(overlayImagePath, shapes, videoInfo);
+                
+                // Create static video from frame + overlay - loop the image for the duration
+                ffmpeg()
+                    .input(frameImagePath)
+                    .inputOptions(['-loop', '1'])
+                    .input(overlayImagePath)
+                    .inputOptions(['-loop', '1'])
+                    .complexFilter('[0:v][1:v]overlay=0:0[out]')
+                    .outputOptions(['-map', '[out]'])
+                    .outputOptions(['-t', duration.toString()])
+                    .outputOptions(['-r', videoInfo.fps.toString()])
+                    .outputOptions(['-pix_fmt', 'yuv420p'])
+                    .videoCodec('libx264')
+                    .output(outputPath)
+                    .on('start', (commandLine) => {
+                        console.log('Creating static clip:', commandLine);
+                    })
+                    .on('end', () => {
+                        console.log(`Static clip created: ${outputPath} (${duration}s)`);
+                        // Cleanup temp images
+                        if (fs.existsSync(frameImagePath)) fs.unlinkSync(frameImagePath);
+                        if (fs.existsSync(overlayImagePath)) fs.unlinkSync(overlayImagePath);
+                        resolve();
+                    })
+                    .on('error', reject)
+                    .run();
+            })
+            .on('error', reject)
+            .run();
+    });
+}
+
+// Create annotation overlay image
+function createAnnotationOverlay(outputPath, shapes, videoInfo) {
+    const canvas = createCanvas(videoInfo.width, videoInfo.height);
+    const ctx = canvas.getContext('2d');
+
+    // Clear canvas with transparent background
+    ctx.clearRect(0, 0, videoInfo.width, videoInfo.height);
+
+    // Draw all shapes
+    shapes.forEach(shape => {
+        drawShapeOnCanvas(ctx, shape);
+    });
+
+    // Save canvas as PNG
+    const buffer = canvas.toBuffer('image/png');
+    fs.writeFileSync(outputPath, buffer);
+}
+
+// Concatenate all video segments and static clips
+function concatenateVideoSegments(tempDir, outputPath, annotationCount) {
+    return new Promise((resolve, reject) => {
+        // Create concat file list
+        const concatList = [];
+        
+        for (let i = 0; i <= annotationCount; i++) {
+            const segmentPath = path.join(tempDir, `segment_${i}.mp4`);
+            if (fs.existsSync(segmentPath)) {
+                concatList.push(`file '${path.relative(tempDir, segmentPath)}'`);
+            }
+            
+            if (i < annotationCount) {
+                const staticPath = path.join(tempDir, `static_${i}.mp4`);
+                if (fs.existsSync(staticPath)) {
+                    concatList.push(`file '${path.relative(tempDir, staticPath)}'`);
+                }
+            }
+        }
+
+        const concatFilePath = path.join(tempDir, 'concat.txt');
+        fs.writeFileSync(concatFilePath, concatList.join('\n'));
+
+        console.log('Concat file contents:');
+        console.log(concatList.join('\n'));
+
+        // Use FFmpeg concat demuxer
+        ffmpeg()
+            .input(concatFilePath)
+            .inputOptions(['-f', 'concat', '-safe', '0'])
+            .videoCodec('libx264')
+            .audioCodec('copy')
+            .output(outputPath)
+            .on('start', (commandLine) => {
+                console.log('FFmpeg concat command:', commandLine);
+            })
+            .on('end', () => {
+                console.log('Video concatenation completed');
+                resolve();
+            })
+            .on('error', (error) => {
+                console.error('Concatenation error:', error);
+                reject(error);
+            })
+            .run();
+    });
 }
 
 // Error handling middleware
