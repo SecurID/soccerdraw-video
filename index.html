@@ -605,11 +605,7 @@
                     document.getElementById('editorSection').style.display = 'block';
                     state.video = video;
                     updateTimeline();
-                    
-                    // Test drawing to ensure canvas is working
-                    setTimeout(() => {
-                        testCanvas();
-                    }, 500);
+            
                 };
                 
             } catch (error) {
@@ -622,24 +618,6 @@
                     <p style="margin-top: 10px; color: #666;">Supports MP4, WebM, OGG formats</p>
                 `;
             }
-        }
-
-        function testCanvas() {
-            if (!state.ctx) {
-                console.error('Canvas context not available for test');
-                return;
-            }
-            
-            console.log('Testing canvas drawing...');
-            
-            // Draw a test red rectangle to verify canvas is working
-            state.ctx.strokeStyle = '#ff0000';
-            state.ctx.lineWidth = 3;
-            state.ctx.beginPath();
-            state.ctx.rect(50, 50, 100, 100);
-            state.ctx.stroke();
-            
-            console.log('Test drawing completed');
         }
 
         function setupCanvas() {
@@ -862,8 +840,7 @@
                 console.error('Canvas context not available');
                 return;
             }
-            
-            console.log('Drawing shape:', shape);
+        
             
             state.ctx.strokeStyle = shape.color;
             state.ctx.lineWidth = shape.size;
